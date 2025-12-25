@@ -1,0 +1,196 @@
+name: RDP + Tailscale + MuMu Auto Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      ts_tailnet:
+        description: "Tailscale tailnet email"
+        required: true
+      ts_api_key:
+        description: "Tailscale API key"
+        required: true
+      ts_authkey:
+        description: "Tailscale Auth key"
+        required: true
+      cycles:
+        description: "Number of cycles"
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  full:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      RDP_USER: mtqmanik
+      RDP_PASS: Manik2200@@
+      MAIN_RUNTIME_MIN: 300
+      BREAK_MIN: 20
+
+    steps:
+
+    # ---------------- CYCLE ----------------
+    - name: Set cycle count
+      shell: pwsh
+      run: |
+        $cycles = [int]"${{ inputs.cycles }}"
+        "CYCLES_LEFT=$cycles" | Out-File -Append $env:GITHUB_ENV
+
+    - name: Set hostname
+      shell: pwsh
+      run: |
+        "TS_HOSTNAME=bullet" | Out-File -Append $env:GITHUB_ENV
+
+    # ---------------- TAILSCALE ----------------
+    - name: Install and Start Tailscale (IP FIXED)
+      shell: pwsh
+      run: |
+        $exe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+        if (-not (Test-Path $exe)) {
+          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi -OutFile tailscale.msi
+          Start-Process msiexec.exe -ArgumentList "/i tailscale.msi /quiet /norestart" -Wait
+        }
+
+        Start-Service Tailscale -ErrorAction SilentlyContinue
+        Start-Sleep 10
+
+        & $exe logout | Out-Null
+        & $exe up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-routes --accept-dns
+
+        Write-Host "Waiting for Tailscale IP..."
+        for ($i=0; $i -lt 15; $i++) {
+          $ip = & $exe ip -4 | Select-Object -First 1
+          if ($ip) { break }
+          Start-Sleep 3
+        }
+
+        if (-not $ip) {
+          Write-Error "❌ Tailscale IP not assigned"
+          exit 1
+        }
+
+        Write-Host "✅ Tailscale IP: $ip"
+        "TS_IP=$ip" | Out-File -Append $env:GITHUB_ENV
+
+    - name: Show Tailscale Status
+      shell: pwsh
+      run: |
+        & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+
+    # ---------------- RDP ----------------
+    - name: Enable RDP and Create User
+      shell: pwsh
+      run: |
+        $u=$env:RDP_USER
+        $p=$env:RDP_PASS
+        $sec = ConvertTo-SecureString $p -AsPlainText -Force
+
+        if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+          New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $u
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+        } else {
+          Set-LocalUser -Name $u -Password $sec
+          Enable-LocalUser -Name $u
+        }
+
+        Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+    # ---------------- PYTHON ----------------
+    - name: Upgrade pip
+      shell: pwsh
+      run: |
+        python -m pip install --upgrade pip
+
+    - name: Install Python Modules
+      shell: pwsh
+      run: |
+        pip install opencv-python
+        pip install uiautomator2
+        pip install playwright
+        pip install customtkinter
+        python -m playwright install
+
+    # ---------------- VS CODE ----------------
+    - name: Install VS Code
+      shell: pwsh
+      run: |
+        winget install --id Microsoft.VisualStudioCode -e --silent `
+        --accept-package-agreements --accept-source-agreements
+
+    # ---------------- MUMU DOWNLOAD ----------------
+    - name: Create MuMu download BAT
+      shell: pwsh
+      run: |
+        @"
+@echo off
+set MUMU_URL=https://a11.gdl.netease.com/MuMu_5.0.7_gw-win-download_all_1761811684.exe?n=MuMu_5.0.7_xR9fESC.exe&key1=17d527515c89765ca756ad7419678abe&key2=694d6e16
+set DATA_URL=https://s3.filebin.net/filebin/f592ca3ceccfde4d5f64669ceb391101739b7d85c29b0ae2b2f7e421892f3637/e48b55c9dcbb4b04046f4d5361e492e6f7dde0985acffa87e40b174625835966
+
+curl -L "%MUMU_URL%" -o MuMu_5.0.7.exe
+curl -L "%DATA_URL%" -o fb.mumudata
+
+start "" MuMu_5.0.7.exe
+start "" fb.mumudata
+"@ | Out-File download_mumu_all.bat -Encoding ascii
+
+    - name: Run MuMu BAT
+      shell: cmd
+      run: |
+        download_mumu_all.bat
+
+    # ---------------- KEEP ALIVE ----------------
+    - name: Keep session alive (5 hours)
+      shell: pwsh
+      run: |
+        $end = (Get-Date).AddMinutes($env:MAIN_RUNTIME_MIN)
+        while ((Get-Date) -lt $end) {
+          Start-Sleep 60
+        }
+
+    - name: Break (20 minutes)
+      if: env.CYCLES_LEFT != '1'
+      shell: pwsh
+      run: |
+        $end = (Get-Date).AddMinutes($env:BREAK_MIN)
+        while ((Get-Date) -lt $end) {
+          Start-Sleep 60
+        }
+
+    # ---------------- LOOP ----------------
+    - name: Dispatch Next Cycle
+      if: env.CYCLES_LEFT != '1'
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $next = [int]$env:CYCLES_LEFT - 1
+
+        $body = @{
+          ref = "${{ github.ref_name }}"
+          inputs = @{
+            ts_tailnet = "${{ inputs.ts_tailnet }}"
+            ts_api_key = "${{ inputs.ts_api_key }}"
+            ts_authkey = "${{ inputs.ts_authkey }}"
+            cycles = "$next"
+          }
+        } | ConvertTo-Json -Depth 5
+
+        Invoke-WebRequest -Method POST `
+          -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp-tailscale-mumu-all.yml/dispatches" `
+          -Headers @{Authorization="Bearer $env:GH_TOKEN"} `
+          -Body $body
+
+    - name: Completed
+      if: env.CYCLES_LEFT == '1'
+      shell: pwsh
+      run: |
+        Write-Host "✅ All cycles completed"
+        Write-Host "RDP IP: $env:TS_IP"
