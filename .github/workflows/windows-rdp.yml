@@ -1,0 +1,216 @@
+name: Windows RDP with Python & Mumu Emulator
+
+on:
+  workflow_dispatch:
+    inputs:
+      tailscale_auth_key:
+        description: 'Tailscale Auth Key (required)'
+        required: true
+      rdp_password:
+        description: 'RDP Password (default: Manik2200@@)'
+        required: false
+        default: 'Manik2200@@'
+
+jobs:
+  setup-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Tailscale
+        run: |
+          # Install Tailscale
+          $tailscaleInstaller = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $tailscaleInstaller
+          Start-Process msiexec.exe -Wait -ArgumentList "/i", "`"$tailscaleInstaller`"", "/quiet", "/norestart"
+          
+          # Connect to Tailscale
+          & "C:\Program Files\Tailscale\tailscale.exe" logout 2>$null
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey "${{ github.event.inputs.tailscale_auth_key }}" --hostname "github-windows-${{ github.run_id }}"
+          
+          # Get Tailscale IP
+          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "✅ Tailscale IP: $ip"
+
+      - name: Create RDP User
+        run: |
+          $username = "mtqmanik"
+          $password = "${{ github.event.inputs.rdp_password }}"
+          
+          # Create user
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $username -Password $securePassword -AccountNeverExpires
+          
+          # Add to groups
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          
+          # Enable RDP
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          Write-Host "✅ RDP User created: $username"
+
+      - name: Install Python and Required Modules
+        run: |
+          # Install Python 3.10
+          choco install python --version=3.10.0 -y
+          refreshenv
+          
+          # Upgrade pip
+          python -m pip install --upgrade pip
+          
+          # Install required Python modules
+          python -m pip install opencv-python
+          python -m pip install uiautomator2
+          python -m pip install playwright
+          python -m pip install customtkinter
+          python -m pip install pillow numpy pandas
+          
+          # Install Playwright browsers
+          playwright install chromium
+          
+          Write-Host "✅ Python modules installed"
+
+      - name: Install Visual Studio Code
+        run: |
+          choco install vscode -y
+          
+          # Install VS Code extensions
+          code --install-extension ms-python.python
+          code --install-extension ms-python.vscode-pylance
+          
+          Write-Host "✅ VS Code installed"
+
+      - name: Install Mumu Player 12
+        run: |
+          # Download Mumu Player
+          $mumuUrl = "https://mumu.163.com/download/win/MuMuPlayer-12.0.5.2-240726131525-win-64bit.exe"
+          $mumuPath = "$env:TEMP\MuMuPlayer.exe"
+          
+          Invoke-WebRequest -Uri $mumuUrl -OutFile $mumuPath
+          
+          # Install silently
+          Start-Process -FilePath $mumuPath -ArgumentList "/S" -Wait
+          
+          Write-Host "✅ Mumu Player installed"
+
+      - name: Install Additional Tools
+        run: |
+          # Install Chocolatey if not installed
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          }
+          
+          # Install tools
+          choco install git -y
+          choco install adb -y
+          choco install nodejs -y
+          
+          Write-Host "✅ Additional tools installed"
+
+      - name: Configure System
+        run: |
+          # Disable sleep
+          powercfg -change -standby-timeout-ac 0
+          
+          # Disable Windows Defender temporarily
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          
+          Write-Host "✅ System configured"
+
+      - name: Create Desktop Files
+        run: |
+          # Create connection info file
+          $infoContent = @"
+RDP Connection Information:
+===========================
+Username: mtqmanik
+Password: ${{ github.event.inputs.rdp_password }}
+Tailscale IP: $env:TAILSCALE_IP
+
+How to connect:
+1. Open Remote Desktop Connection (mstsc)
+2. Enter: $env:TAILSCALE_IP
+3. Username: mtqmanik
+4. Password: [your password]
+
+Installed Software:
+- Python 3.10 with all required modules
+- VS Code with Python extensions
+- Mumu Player 12 Emulator
+- Git, ADB, Node.js
+"@
+          
+          $desktopPath = [Environment]::GetFolderPath("Desktop")
+          $infoContent | Out-File -FilePath "$desktopPath\RDP_Info.txt" -Encoding UTF8
+          
+          # Create test Python script
+          $pythonTest = @"
+import cv2
+import uiautomator2 as u2
+import customtkinter as ctk
+import playwright
+
+print("✅ All Python modules installed successfully!")
+print(f"OpenCV version: {cv2.__version__}")
+
+# Test CustomTkinter
+ctk.set_appearance_mode("dark")
+print("CustomTkinter: OK")
+
+# Test Playwright
+from playwright.sync_api import sync_playwright
+print("Playwright: OK")
+
+print("\n🎉 Setup completed successfully!")
+print("You can now use RDP to connect.")
+"@
+          
+          $pythonTest | Out-File -FilePath "$desktopPath\test_setup.py" -Encoding UTF8
+          
+          Write-Host "✅ Desktop files created"
+
+      - name: Display Connection Info
+        run: |
+          Write-Host "=========================================="
+          Write-Host "🎉 SETUP COMPLETED SUCCESSFULLY!"
+          Write-Host "=========================================="
+          Write-Host ""
+          Write-Host "📋 RDP CONNECTION DETAILS:"
+          Write-Host "Username: mtqmanik"
+          Write-Host "Password: ${{ github.event.inputs.rdp_password }}"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host ""
+          Write-Host "💻 INSTALLED SOFTWARE:"
+          Write-Host "- Python 3.10 with OpenCV, uiautomator2, Playwright, CustomTkinter"
+          Write-Host "- Visual Studio Code with Python extensions"
+          Write-Host "- Mumu Player 12 Android Emulator"
+          Write-Host "- Git, ADB, Node.js"
+          Write-Host ""
+          Write-Host "📁 On Desktop you will find:"
+          Write-Host "- RDP_Info.txt (connection details)"
+          Write-Host "- test_setup.py (Python test script)"
+          Write-Host ""
+          Write-Host "⏰ This RDP session will remain active for 6 hours"
+          Write-Host "=========================================="
+
+      - name: Keep Session Alive
+        run: |
+          # Keep alive for almost 6 hours (GitHub limit)
+          $endTime = (Get-Date).AddMinutes(355)
+          Write-Host "Session will stay active until: $endTime"
+          
+          while ((Get-Date) -lt $endTime) {
+              $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
+              Write-Host "Time remaining: $remaining minutes"
+              Start-Sleep -Seconds 300  # Sleep 5 minutes
+          }
+          
+          Write-Host "⏰ Session time completed"
