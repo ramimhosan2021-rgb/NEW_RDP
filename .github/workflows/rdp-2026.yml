@@ -22,7 +22,7 @@ jobs:
 
     env:
       RDP_USER: masumhub
-      RDP_PASS: @MasumHub
+      RDP_PASS: MasumHub237
       MAIN_RUNTIME_MIN: 360
 
     steps:
